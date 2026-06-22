@@ -2,6 +2,8 @@ import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentD
 import type { SessionEntry, SessionInfo, SessionContext, SessionTreeNode, AssistantMessage } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
+import { readdir, readFile, stat, rename as fsRename, mkdir } from "fs/promises";
+import { join, dirname } from "path";
 
 export { getAgentDir };
 
@@ -30,6 +32,91 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
       parentSessionId: s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined,
     };
   });
+}
+
+/**
+ * List archived sessions from the `archived/` subdirectory under each cwd folder.
+ * SessionManager.listAll() does not include these, so we scan the filesystem manually.
+ */
+export async function listArchivedSessions(): Promise<SessionInfo[]> {
+  const sessionsDir = getSessionsDir();
+  const archived: SessionInfo[] = [];
+
+  let cwdDirs: string[];
+  try {
+    cwdDirs = await readdir(sessionsDir);
+  } catch {
+    return [];
+  }
+
+  for (const cwdDir of cwdDirs) {
+    if (cwdDir.startsWith(".")) continue;
+    const archivedDir = join(sessionsDir, cwdDir, "archived");
+
+    let files: string[];
+    try {
+      files = await readdir(archivedDir);
+    } catch {
+      continue; // no archived/ dir for this cwd
+    }
+
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const filePath = join(archivedDir, file);
+
+      try {
+        const content = await readFile(filePath, "utf-8");
+        const lines = content.split("\n").filter((l) => l.trim().length > 0);
+        if (lines.length === 0) continue;
+
+        const header = JSON.parse(lines[0]);
+        if (header.type !== "session") continue;
+
+        // Count message entries
+        let messageCount = 0;
+        let firstMessage = "";
+        for (let i = 1; i < lines.length; i++) {
+          try {
+            const entry = JSON.parse(lines[i]);
+            if (entry.type === "message") {
+              messageCount++;
+              if (!firstMessage && entry.message?.role === "user") {
+                const msg = entry.message.content;
+                firstMessage =
+                  typeof msg === "string"
+                    ? msg.slice(0, 100)
+                    : Array.isArray(msg) && msg.length > 0 && typeof msg[0] === "object" && "text" in msg[0]
+                      ? String(msg[0].text).slice(0, 100)
+                      : "(file content)";
+              }
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+
+        const fileStat = await stat(filePath);
+
+        archived.push({
+          path: filePath,
+          id: header.id,
+          cwd: header.cwd || "",
+          name: undefined,
+          created: header.timestamp
+            ? new Date(header.timestamp).toISOString()
+            : new Date(fileStat.birthtime).toISOString(),
+          modified: new Date(fileStat.mtime).toISOString(),
+          messageCount,
+          firstMessage: firstMessage || "(no messages)",
+          archived: true,
+        });
+      } catch {
+        // skip corrupt files
+      }
+    }
+  }
+
+  return archived;
 }
 
 // ============================================================================
@@ -181,6 +268,24 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     thinkingLevel: piCtx.thinkingLevel,
     model: piCtx.model,
   };
+}
+
+/**
+ * Move a session file into the `archived/` subdirectory of its cwd folder.
+ */
+export async function archiveSession(sessionId: string): Promise<void> {
+  const filePath = await resolveSessionPath(sessionId);
+  if (!filePath) throw new Error(`Session ${sessionId} not found`);
+
+  const dir = dirname(filePath);
+  const archivedDir = join(dir, "archived");
+  await mkdir(archivedDir, { recursive: true });
+
+  const fileName = filePath.split(/[/\\]/).pop()!;
+  const destPath = join(archivedDir, fileName);
+
+  await fsRename(filePath, destPath);
+  invalidateSessionPathCache(sessionId);
 }
 
 export function getLeafId(entries: SessionEntry[]): string | null {

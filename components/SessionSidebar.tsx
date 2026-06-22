@@ -198,6 +198,8 @@ function PiAgentTitle() {
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const [archivedSessions, setArchivedSessions] = useState<SessionInfo[]>([]);
+  const [archivedCollapsed, setArchivedCollapsed] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -212,6 +214,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
+  const [archiveConfirmId, setArchiveConfirmId] = useState<string | null>(null);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -221,8 +224,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (showLoading) setLoading(true);
       const res = await fetch("/api/sessions");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[] };
+      const data = await res.json() as { sessions: SessionInfo[]; archived?: SessionInfo[] };
       setAllSessions(data.sessions);
+      setArchivedSessions(data.archived ?? []);
       setError(null);
       if (!showLoading) {
         setSessionRefreshDone(true);
@@ -353,6 +357,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const filteredSessions = selectedCwd
     ? allSessions.filter((s) => s.cwd === selectedCwd)
     : allSessions;
+
+  const filteredArchived = selectedCwd
+    ? archivedSessions.filter((s) => s.cwd === selectedCwd)
+    : archivedSessions;
 
   // Build parent-child tree within the filtered set
   const sessionTree = buildSessionTree(filteredSessions);
@@ -710,9 +718,53 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               onSessionDeleted?.(id);
               loadSessions();
             }}
+            onArchived={(id) => {
+              loadSessions();
+            }}
             depth={0}
           />
         ))}
+
+        {/* Archived sessions section */}
+        {filteredArchived.length > 0 && (
+          <>
+            <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+            <button
+              onClick={() => setArchivedCollapsed((v) => !v)}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                width: "100%", padding: "8px 14px",
+                background: "none", border: "none",
+                color: "var(--text-dim)", cursor: "pointer",
+                fontSize: 11, fontWeight: 600, letterSpacing: "0.05em",
+                textTransform: "uppercase", textAlign: "left",
+              }}
+              title={archivedCollapsed ? "Show archived sessions" : "Hide archived sessions"}
+            >
+              <svg
+                width="9" height="9" viewBox="0 0 10 10" fill="none"
+                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                style={{ transform: archivedCollapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s", flexShrink: 0 }}
+              >
+                <polyline points="3 2 7 5 3 8" />
+              </svg>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, opacity: 0.6 }}>
+                <polyline points="21 8 21 21 3 21 3 8" />
+                <rect x="1" y="3" width="22" height="5" rx="1" />
+                <line x1="10" y1="12" x2="14" y2="12" />
+              </svg>
+              Archived ({filteredArchived.length})
+            </button>
+            {!archivedCollapsed && filteredArchived.map((session) => (
+              <ArchivedItem
+                key={session.id}
+                session={session}
+                isSelected={session.id === selectedSessionId}
+                onClick={() => onSelectSession(session)}
+              />
+            ))}
+          </>
+        )}
       </div>
 
       {/* File Explorer section */}
@@ -812,6 +864,7 @@ function SessionTreeItem({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  onArchived,
   depth,
 }: {
   node: SessionTreeNode;
@@ -819,6 +872,7 @@ function SessionTreeItem({
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  onArchived?: (id: string) => void;
   depth: number;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -844,6 +898,7 @@ function SessionTreeItem({
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
+          onArchived={onArchived}
           depth={depth}
           hasChildren={hasChildren}
           collapsed={collapsed}
@@ -860,11 +915,74 @@ function SessionTreeItem({
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
+              onArchived={onArchived}
               depth={depth + 1}
             />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Archived session item — read-only, no hover actions, dimmed styling */
+function ArchivedItem({
+  session,
+  isSelected,
+  onClick,
+}: {
+  session: SessionInfo;
+  isSelected: boolean;
+  onClick: () => void;
+}) {
+  const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        height: 50,
+        display: "flex",
+        alignItems: "center",
+        paddingLeft: 14,
+        paddingRight: 8,
+        cursor: "pointer",
+        background: isSelected ? "var(--bg-selected)" : "transparent",
+        borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent",
+        opacity: 0.65,
+        transition: "opacity 0.12s, background 0.1s",
+        gap: 6,
+        overflow: "hidden",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.65"; }}
+    >
+      {/* Archive icon */}
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+        <polyline points="21 8 21 21 3 21 3 8" />
+        <rect x="1" y="3" width="22" height="5" rx="1" />
+        <line x1="10" y1="12" x2="14" y2="12" />
+      </svg>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: 12,
+            fontWeight: isSelected ? 500 : 400,
+            lineHeight: 1.4,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: "var(--text-muted)",
+          }}
+          title={title}
+        >
+          {title}
+        </div>
+        <div style={{ marginTop: 2, display: "flex", gap: 8, color: "var(--text-dim)", fontSize: 11 }}>
+          <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+          <span>{session.messageCount} msgs</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -875,6 +993,7 @@ function SessionItem({
   onClick,
   onRenamed,
   onDeleted,
+  onArchived,
   depth = 0,
   hasChildren = false,
   collapsed = false,
@@ -885,6 +1004,7 @@ function SessionItem({
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
+  onArchived?: (id: string) => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -943,6 +1063,20 @@ function SessionItem({
     e.stopPropagation();
     setConfirmDelete(false);
   }, []);
+
+  const [archiving, setArchiving] = useState(false);
+
+  const handleArchive = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (archiving) return;
+    setArchiving(true);
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
+      onArchived?.(session.id);
+    } catch {
+      setArchiving(false);
+    }
+  }, [session.id, onArchived, archiving]);
 
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
   const ITEM_HEIGHT = 54;
@@ -1116,6 +1250,37 @@ function SessionItem({
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                </svg>
+              </button>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                title="Archive"
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: "var(--bg-hover)", border: "1px solid var(--border)",
+                  borderRadius: 7, color: "var(--text-muted)",
+                  cursor: archiving ? "not-allowed" : "pointer", flexShrink: 0,
+                  opacity: archiving ? 0.5 : 1,
+                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  if (archiving) return;
+                  e.currentTarget.style.background = "var(--bg-selected)";
+                  e.currentTarget.style.color = "var(--accent)";
+                  e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text-muted)";
+                  e.currentTarget.style.borderColor = "var(--border)";
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="21 8 21 21 3 21 3 8" />
+                  <rect x="1" y="3" width="22" height="5" rx="1" />
+                  <line x1="10" y1="12" x2="14" y2="12" />
                 </svg>
               </button>
               <button

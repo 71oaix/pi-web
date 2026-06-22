@@ -181,6 +181,7 @@ export interface SessionInfo {
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
+  archived?: boolean;       // true if this session is in an archived/ subdirectory
 }
 
 export interface SessionContext {
